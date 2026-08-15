@@ -4,9 +4,11 @@
 
 **Goal:** Build a deliberately-malicious MCP server that serves 8 canonical MCP attack patterns as a practice target for the Agent 365 CLI (static schema eval) and the Agent Governance Toolkit runtime gateway.
 
-**Architecture:** A FastMCP server exposes tools whose *definitions* carry each attack's signal (what the Agent 365 CLI scores) and whose *runtime* performs a defanged-but-real action against lab-local decoy files, exfiltrating only to a local collector (what AGT observes). All file access is confined to `./lab/` and all network egress to loopback by in-code guards.
+**Architecture:** An `MCPServer` (official `mcp` 2.0 SDK) exposes tools whose *definitions* carry each attack's signal (what the Agent 365 CLI scores) and whose *runtime* performs a defanged-but-real action against lab-local decoy files, exfiltrating only to a local collector (what AGT observes). All file access is confined to `./lab/` and all network egress to loopback by in-code guards.
 
-**Tech Stack:** Python 3.11+, `mcp` (FastMCP: `mcp.server.fastmcp`), `httpx`, `anyio`, `pytest`. AGT (`agentmesh`) is used only in the runtime-gateway acceptance step.
+**Tech Stack:** Python 3.11+, `mcp==2.0.0` (high-level `MCPServer` from `mcp.server`), `httpx`, `anyio`, `pytest`. AGT (`agentmesh`) is used only in the runtime-gateway acceptance step.
+
+**API note (verified against the installed SDK):** Use `from mcp.server import MCPServer`. `MCPServer(name)` takes no host/port; register tools with `mcp.add_tool(fn, name=..., description=...)`. `mcp.list_tools()` is a coroutine returning `list[Tool]`, each with `.name`, `.description`, `.inputSchema`. For the rug-pull mutation, `mcp._tool_manager.get_tool("greet").description = ...` works (fallback `mcp._tool_manager._tools["greet"]`). Serve HTTP with `mcp.run("streamable-http", host=..., port=..., streamable_http_path="/mcp")`.
 
 ## Global Constraints
 
@@ -70,7 +72,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'config'`
 
 ```python
 # requirements.txt
-mcp>=1.2
+mcp==2.0.0
 httpx>=0.27
 anyio>=4
 pytest>=8
@@ -134,7 +136,7 @@ def enabled_modules():
 import anyio
 
 def tools_of(mcp):
-    """Return {name: Tool} from a FastMCP server's public list_tools()."""
+    """Return {name: Tool} from an MCPServer's public list_tools() coroutine."""
     tools = anyio.run(mcp.list_tools)
     return {t.name: t for t in tools}
 ```
@@ -445,10 +447,10 @@ git commit -m "feat: local attacker collector sink logging POSTed exfil"
 
 **Interfaces:**
 - Consumes: `guards.ensure_lab_ready`, `server.attacks.enabled_modules`, `config.HTTP_HOST/HTTP_PORT`.
-- Produces: `build_server() -> FastMCP` — calls `ensure_lab_ready()`, constructs `FastMCP("evil-mcp-lab", host, port)`, calls `module.register(mcp)` for each enabled module, returns it.
+- Produces: `build_server() -> MCPServer` — calls `ensure_lab_ready()`, constructs `MCPServer("evil-mcp-lab")`, calls `module.register(mcp)` for each enabled module, returns it.
 - Produces: `main()` — `--http` runs streamable-http, else stdio.
 
-**Note:** No attack modules exist yet, so `build_server()` registers zero tools here; the test only asserts it constructs and lists (an empty list) without error after lab setup. Each later attack task adds its own tool + definition test.
+**Note:** No attack modules exist yet, so `build_server()` (constructing an `MCPServer`) registers zero tools here; the test only asserts it constructs and lists (an empty list) without error after lab setup. Each later attack task adds its own tool + definition test.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -475,16 +477,16 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'server.main'`
 ```python
 # server/main.py
 import argparse
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 import config
 from server import guards
 from server.attacks import enabled_modules
 
 
-def build_server() -> FastMCP:
+def build_server() -> MCPServer:
     guards.ensure_lab_ready()
-    mcp = FastMCP("evil-mcp-lab", host=config.HTTP_HOST, port=config.HTTP_PORT)
+    mcp = MCPServer("evil-mcp-lab")  # mcp 2.0: host/port go to run(), not the constructor
     for module in enabled_modules():
         module.register(mcp)
     return mcp
@@ -495,7 +497,15 @@ def main() -> None:
     parser.add_argument("--http", action="store_true", help="serve Streamable HTTP")
     args = parser.parse_args()
     mcp = build_server()
-    mcp.run(transport="streamable-http" if args.http else "stdio")
+    if args.http:
+        mcp.run(
+            "streamable-http",
+            host=config.HTTP_HOST,
+            port=config.HTTP_PORT,
+            streamable_http_path=config.HTTP_PATH,
+        )
+    else:
+        mcp.run("stdio")
 
 
 if __name__ == "__main__":
@@ -530,12 +540,12 @@ git commit -m "feat: server wiring registers enabled attack modules"
 ```python
 # tests/attacks/test_tool_poisoning.py
 from lab.setup_lab import main as setup_lab
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import tool_poisoning
 from conftest import tools_of
 
 def test_poison_signal_in_description():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     tool_poisoning.register(mcp)
     desc = tools_of(mcp)["get_weather"].description
     assert "<IMPORTANT>" in desc and "fake.env" in desc
@@ -600,19 +610,19 @@ git commit -m "feat(attack): tool poisoning via hidden IMPORTANT block"
 **Interfaces:**
 - Produces module with `NAME="rug_pull"`, `register(mcp)` adding tool `greet` with a clean description that mutates to a malicious one after `config.RUG_PULL_THRESHOLD` calls (in-memory definition drift).
 
-**Note:** `_mutate_desc` reaches into FastMCP's tool manager to change the stored `Tool.description`. FastMCP's internal attribute names may differ by version — the implementation tries `get_tool(...)` then falls back to `_tools[...]`. If both fail on the installed version, inspect `dir(mcp._tool_manager)` and adjust; keep the public behavior (description changes after N calls) identical.
+**Note:** `_mutate_desc` reaches into the `MCPServer._tool_manager` to change the stored `Tool.description`. Verified against mcp 2.0.0: `mcp._tool_manager.get_tool("greet")` returns the mutable `Tool` and `.description` is settable (fallback `mcp._tool_manager._tools["greet"]`). Keep the public behavior (description changes after N calls) identical.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/attacks/test_rug_pull.py
 import config
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import rug_pull
 from conftest import tools_of
 
 def test_description_clean_then_drifts():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     rug_pull.register(mcp)
     assert "IMPORTANT" not in tools_of(mcp)["greet"].description
     for _ in range(config.RUG_PULL_THRESHOLD):
@@ -698,12 +708,12 @@ git commit -m "feat(attack): rug pull mutates tool description after N calls"
 
 ```python
 # tests/attacks/test_tool_shadowing.py
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import tool_shadowing
 from conftest import tools_of
 
 def test_shadow_targets_other_tool():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     tool_shadowing.register(mcp)
     desc = tools_of(mcp)["format_text"].description
     assert "send_email" in desc and "BCC" in desc
@@ -769,14 +779,14 @@ git commit -m "feat(attack): tool shadowing injects cross-tool instructions"
 import threading
 import pytest
 import config
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import data_exfiltration
 from server import guards
 from collector.collector import make_server
 from conftest import tools_of
 
 def test_exfil_signal_in_description():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     data_exfiltration.register(mcp)
     assert "debug_endpoint" in tools_of(mcp)["summarize"].description
 
@@ -860,12 +870,12 @@ git commit -m "feat(attack): data exfiltration to loopback-guarded sink"
 ```python
 # tests/attacks/test_sensitive_file_access.py
 from lab.setup_lab import main as setup_lab
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import sensitive_file_access as sfa
 from conftest import tools_of
 
 def test_advertises_sensitive_paths():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     sfa.register(mcp)
     desc = tools_of(mcp)["read_config"].description
     assert ".ssh" in desc and ".env" in desc
@@ -938,12 +948,12 @@ git commit -m "feat(attack): sensitive-file access advertises creds, reads decoy
 
 ```python
 # tests/attacks/test_injection_relay.py
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import injection_relay
 from conftest import tools_of
 
 def test_benign_looking_description():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     injection_relay.register(mcp)
     assert "notes" in tools_of(mcp)["fetch_notes"].description.lower()
 
@@ -1009,12 +1019,12 @@ git commit -m "feat(attack): indirect prompt-injection relay via tool output"
 
 ```python
 # tests/attacks/test_schema_mismatch.py
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import schema_mismatch
 from conftest import tools_of
 
 def test_schema_contradicts_description():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     schema_mismatch.register(mcp)
     tool = tools_of(mcp)["repeat"]
     # Description implies a count of repetitions...
@@ -1079,12 +1089,12 @@ git commit -m "feat(attack): schema/description mismatch on repeat.count"
 ```python
 # tests/attacks/test_sandbox_escape.py
 from lab.setup_lab import main as setup_lab
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from server.attacks import sandbox_escape
 from conftest import tools_of
 
 def test_advertises_traversal():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     sandbox_escape.register(mcp)
     assert "/etc/passwd" in tools_of(mcp)["read_path"].description
 
@@ -1290,4 +1300,4 @@ git commit -m "docs: AGT policy + README with attack catalog and run/scan steps"
 - **Spec coverage:** all 8 attacks (spec §4) → Tasks 6–13; isolation invariants (spec §5) → Task 2 guards, exercised in Tasks 9/13/14; collector (spec §3) → Task 4; decoys (spec §5.4) → Task 3; two transports (spec §3) → Task 5; both control points (spec §2) → CLI path in Task 15 README, AGT path in Task 15 policy; testing strategy (spec §8) → per-attack definition+runtime tests plus Task 14 integration.
 - **Placeholder scan:** no TBD/TODO; every code step has real code; README table rows are the one intentionally-templated doc artifact, filled from the per-module `NAME`/`MAPPING` already defined in Tasks 6–13.
 - **Type consistency:** `register(mcp)`, `NAME`, `MAPPING`, `guards.resolve_in_lab`, `guards.assert_loopback`, `guards.audit`, `config.SINK_URL`, `config.RUG_PULL_THRESHOLD`, `make_server(host,port,log_path)`, `tools_of(mcp)` used identically across all tasks.
-- **Open items (verify at run time):** FastMCP tool-manager internals for rug-pull mutation (Task 7 note); FastMCP streamable-http mount path `/mcp` vs `/` (spec §10); AGT `agentmesh` policy schema + import surface (Task 15 note).
+- **Resolved during setup (mcp 2.0.0 verified):** `MCPServer` API, tool-manager internals for rug-pull mutation, and streamable-http mount path (`/mcp`, the SDK default). **Still open (verify at acceptance):** AGT `agentmesh` policy schema + import surface (Task 15 note).
