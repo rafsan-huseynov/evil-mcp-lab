@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 collector.log
 audit.log
+.venv/
+.superpowers/
