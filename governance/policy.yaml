@@ -1,0 +1,52 @@
+# governance/policy.yaml  (LAB USE ONLY)
+#
+# Intended-shape policy for the Agent Governance Toolkit (AGT) runtime gateway
+# (`agentmesh.governance.govern`). This shape has NOT been verified against a
+# real `agentmesh` release — the package is not installed in this environment.
+# Before relying on this in a real AGT deployment, confirm the key names below
+# against the docs/schema shipped with the installed `agentmesh` release and
+# adjust as needed, while keeping the same detections enabled:
+#   - tool_metadata_poisoning   (tool description / metadata poisoning, e.g. tool_poisoning,
+#                                 tool_shadowing modules in this lab)
+#   - tool_change_rug_pull      (tool description mutating post-install, e.g. rug_pull module)
+#   - dangerous_arguments       (path traversal / credential-path args, e.g. sandbox_escape,
+#                                 sensitive_file_access modules)
+#   - tool_response_scanning    (prompt-injection payloads riding in tool *output*, e.g.
+#                                 injection_relay, tool_shadowing modules)
+#   - per-client budgets        (call-rate limiting per calling client)
+#   - redacted audit            (decision log with secrets redacted before storage)
+
+version: 1
+mode: block
+
+detections:
+  tool_metadata_poisoning:
+    enabled: true
+
+  tool_change_rug_pull:
+    enabled: true
+
+  dangerous_arguments:
+    enabled: true
+    deny_patterns:
+      - "../"
+      - "/etc/"
+      - "id_rsa"
+      - ".ssh"
+      - "credentials"
+      - ".env"
+
+  tool_response_scanning:
+    enabled: true
+    deny_patterns:
+      - "<IMPORTANT>"
+      - "Ignore previous instructions"
+      - "BCC"
+      - "SYSTEM]"
+
+budgets:
+  per_client_tool_calls: 20
+
+audit:
+  redact: true
+  store: ./audit/agt-decisions.jsonl
