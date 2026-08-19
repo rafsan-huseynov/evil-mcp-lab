@@ -1,5 +1,6 @@
 lab/secrets/
 eval/
+eval-live/
 __pycache__/
 *.pyc
 collector.log

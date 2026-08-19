@@ -26,6 +26,11 @@ def main() -> None:
             host=config.HTTP_HOST,
             port=config.HTTP_PORT,
             streamable_http_path=config.HTTP_PATH,
+            # Stateless mode: don't require an Mcp-Session-Id round-trip on every
+            # request. The Agent 365 CLI evaluator (a365 develop-mcp evaluate) and
+            # other simple tools/list clients don't echo the session header, so
+            # stateful mode rejects their follow-up requests with HTTP 400.
+            stateless_http=True,
         )
     else:
         mcp.run("stdio")
